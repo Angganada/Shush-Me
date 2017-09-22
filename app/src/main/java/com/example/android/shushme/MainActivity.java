@@ -18,6 +18,7 @@ package com.example.android.shushme;
 
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
@@ -31,6 +32,8 @@ import android.support.v7.widget.RecyclerView;
 import android.util.Log;
 import android.view.View;
 import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.Switch;
 import android.widget.Toast;
 
 import com.example.android.shushme.provider.PlaceContract;
@@ -63,7 +66,9 @@ public class MainActivity extends AppCompatActivity implements
     // Member variables
     private PlaceListAdapter mAdapter;
     private RecyclerView mRecyclerView;
+    private boolean mIsEnabled;
     private GoogleApiClient mClient;
+    private Geofencing mGeofencing;
 
     /**
      * Called when the activity is starting
@@ -81,6 +86,22 @@ public class MainActivity extends AppCompatActivity implements
         mAdapter = new PlaceListAdapter(this, null);
         mRecyclerView.setAdapter(mAdapter);
 
+        // Initialize the switch state and Handle enable/disable switch change
+        Switch onOffSwitch = (Switch) findViewById(R.id.enable_switch);
+        mIsEnabled = getPreferences(MODE_PRIVATE).getBoolean(getString(R.string.setting_enabled), false);
+        onOffSwitch.setChecked(mIsEnabled);
+        onOffSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                SharedPreferences.Editor editor = getPreferences(MODE_PRIVATE).edit();
+                editor.putBoolean(getString(R.string.setting_enabled), isChecked);
+                mIsEnabled = isChecked;
+                editor.commit();
+                if (isChecked) mGeofencing.registerAllGeofences();
+                else mGeofencing.unRegisterAllGeofences();
+            }
+
+        });
 
         // Build up the LocationServices API client
         // Uses the addApi method to request the LocationServices API
@@ -93,6 +114,8 @@ public class MainActivity extends AppCompatActivity implements
                 .enableAutoManage(this, this)
                 .build();
 
+        mGeofencing = new Geofencing(this, mClient);
+
     }
 
     /***
@@ -102,32 +125,8 @@ public class MainActivity extends AppCompatActivity implements
      */
     @Override
     public void onConnected(@Nullable Bundle connectionHint) {
-        refreshPlaceData();
+        refreshPlacesData();
         Log.i(TAG, "API Client Connection Successful!");
-    }
-
-    private void refreshPlaceData() {
-        Uri uri = PlaceContract.PlaceEntry.CONTENT_URI;
-        Cursor data = getContentResolver().query(
-                uri,
-                null,
-                null,
-                null,
-                null);
-
-        if (data == null || data.getCount() == 0) return;
-        List<String> guids = new ArrayList<>();
-        while (data.moveToNext()) {
-            guids.add(data.getString(data.getColumnIndex(PlaceContract.PlaceEntry.COLUMN_PLACE_ID)));
-        }
-        PendingResult<PlaceBuffer> placeResult = Places.GeoDataApi.getPlaceById(mClient,
-                guids.toArray(new String[guids.size()]));
-        placeResult.setResultCallback(new ResultCallback<PlaceBuffer>() {
-            @Override
-            public void onResult(@NonNull PlaceBuffer places) {
-
-            }
-        });
     }
 
     /***
@@ -150,6 +149,32 @@ public class MainActivity extends AppCompatActivity implements
         Log.e(TAG, "API Client Connection Failed!");
     }
 
+    public void refreshPlacesData() {
+        Uri uri = PlaceContract.PlaceEntry.CONTENT_URI;
+        Cursor data = getContentResolver().query(
+                uri,
+                null,
+                null,
+                null,
+                null);
+
+        if (data == null || data.getCount() == 0) return;
+        List<String> guids = new ArrayList<String>();
+        while (data.moveToNext()) {
+            guids.add(data.getString(data.getColumnIndex(PlaceContract.PlaceEntry.COLUMN_PLACE_ID)));
+        }
+        PendingResult<PlaceBuffer> placeResult = Places.GeoDataApi.getPlaceById(mClient,
+                guids.toArray(new String[guids.size()]));
+        placeResult.setResultCallback(new ResultCallback<PlaceBuffer>() {
+            @Override
+            public void onResult(@NonNull PlaceBuffer places) {
+                mAdapter.swapPlaces(places);
+                mGeofencing.updateGeofencesList(places);
+                if (mIsEnabled) mGeofencing.registerAllGeofences();
+            }
+        });
+    }
+
     /***
      * Button Click event handler to handle clicking the "Add new location" Button
      *
@@ -161,7 +186,6 @@ public class MainActivity extends AppCompatActivity implements
             Toast.makeText(this, getString(R.string.need_location_permission_message), Toast.LENGTH_LONG).show();
             return;
         }
-
         try {
             // Start a new Activity for the Place Picker API, this will trigger {@code #onActivityResult}
             // when a place is selected or with the user cancels.
@@ -177,6 +201,14 @@ public class MainActivity extends AppCompatActivity implements
         }
     }
 
+
+    /***
+     * Called when the Place Picker Activity returns back with a selected place (or after canceling)
+     *
+     * @param requestCode The request code passed when calling startActivityForResult
+     * @param resultCode  The result code specified by the second activity
+     * @param data        The Intent that carries the result data.
+     */
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == PLACE_PICKER_REQUEST && resultCode == RESULT_OK) {
             Place place = PlacePicker.getPlace(this, data);
@@ -185,15 +217,18 @@ public class MainActivity extends AppCompatActivity implements
                 return;
             }
 
+            // Extract the place information from the API
             String placeName = place.getName().toString();
             String placeAddress = place.getAddress().toString();
             String placeID = place.getId();
 
+            // Insert a new place into DB
             ContentValues contentValues = new ContentValues();
             contentValues.put(PlaceContract.PlaceEntry.COLUMN_PLACE_ID, placeID);
             getContentResolver().insert(PlaceContract.PlaceEntry.CONTENT_URI, contentValues);
 
-            refreshPlaceData();
+            // Get live data information
+            refreshPlacesData();
         }
     }
 
